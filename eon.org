@@ -1,0 +1,16 @@
+* About
+
+Eon is a simple object-oriented extension to Emacs Lisp.
+
+* Download 
+
+See http://github.com/dto/eon for download details. No release yet.
+
+* Tasks
+
+** DONE initforms
+CLOSED: [2009-01-04 Sun 13:15]
+** TODO initialize-instance
+** TODO single inheritance
+** TODO font-locking support
+** TODO bracket parenthesis support

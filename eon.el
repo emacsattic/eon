@@ -20,19 +20,13 @@
 
 ;;; Commentary:
 
-;; TODO define methods
-;; TODO single inheritance
-;; TODO initforms
-;; TODO bring slots into scope <foo>
-;; TODO method invocation with [verb object args... ] 
-;; TODO font-locking support
-;; TODO bracket parenthesis support
+;; FIXME
 
 ;;; Code:
 
 (require 'cl)
 
-;;; Dealing with symbols
+;;; Making proper symbols
 
 (defun make-keyword (name)
   (let ((string (etypecase name
@@ -52,11 +46,6 @@
 	;; no, delimit it
 	(intern (concat delimiter symname delimiter)))))
 
-(defvar struct-symbol-delimiter "++")
-
-(defun struct-symbol (class-name)
-  (delimited-symbol class-name struct-symbol-delimiter))
-  
 (defvar class-symbol-delimiter "+")
 
 (defun class-symbol (class-name)
@@ -67,9 +56,33 @@
 (defun constructor-symbol (class-name)
   (delimited-symbol class-name constructor-symbol-delimiter))
 
+;;; Defining objects, getting and setting slot values
+
+(defstruct object class-name slots)
+
+(defvar slot-lookup-failure (gensym))
+
+(defun slot-value (object slot)
+  (let ((result (getf (object-slots object) slot)))
+    (if (eq result slot-lookup-failure)
+	(error "Cannot find slot %S" slot)
+	result)))
+
+(defun set-slot-value (object slot value)
+  (setf (getf (object-slots object) slot)
+	value))
+
+(defalias '@ 'slot-value)
+
+(defsetf slot-value set-slot-value)
+     
+;; (defun class-of (object)
+;;   (symbol-value (object-class-name object)))
+
 ;;; Defining classes
 
-(defstruct class name constructor struct-name options slots methods)
+(defstruct class 
+  name constructor parent options slot-specs methods)
 
 (defun class-exists (class-name)
   (let ((symbol (class-symbol class-name)))
@@ -92,39 +105,46 @@
 
 (defsetf class-definition set-class-definition)
 
-(defmacro define-class (name options &rest slots)
+(defun slot-spec (class-name slot-name)
+  (assoc (make-keyword slot-name) 
+	 (class-slot-specs (class-definition class-name))))
+
+(defun normalize-slot-spec (spec)
+  (etypecase spec
+    (symbol (list (make-keyword spec) :initform nil))
+    (list (destructuring-bind (name &key initform) spec
+	    (list (make-keyword name)
+		  :initform initform)))))
+
+(defun* make-slot-initializer (slot-spec)
+  (destructuring-bind (slot-name &key initform) slot-spec
+    `(setf (slot-value self ,slot-name)
+	   ,initform)))
+
+(defmacro define-class (name options &rest slot-specs)
   (let* ((class-name (class-symbol name))
-	 (struct-name (struct-symbol name))
-	 (constructor-name (constructor-symbol name)))
-    `(progn
-       (defstruct (,struct-name (:constructor ,constructor-name))
-	 ,@slots)
-       (setf (class-definition ',class-name)
-	     (make-class :name ',class-name
-			 :struct-name ',struct-name
-			 :constructor #',constructor-name
-			 :options ',options
-			 :slots ',slots)))))
+	 (constructor-name (constructor-symbol name))
+	 (slots (mapcar #'normalize-slot-spec slot-specs))
+	 (newob (gensym)))
+    (destructuring-bind (&key parent &allow-other-keys) options
+      `(progn
+	 (setf (class-definition ',class-name)
+	       (make-class :name ',class-name
+			   :parent ',parent
+			   :constructor #',constructor-name
+			   :options ',options
+			   :slot-specs ',slots))
+	 (defun ,constructor-name ()
+	   (let ((,newob (make-object :class-name ',name)))
+	     (prog1 ,newob
+	       (eon-prog ,newob
+		 ,@(mapcar #'make-slot-initializer slots)))))))))
 
-;;; Defining objects, getting and setting slot values
+;;; Supporting method syntax
 
-(defstruct object class-name slots)
-
-(defvar slot-lookup-failure (gensym))
-
-(defun slot-value (object slot)
-  (let ((result (getf (object-slots object) slot)))
-    (if (eq result slot-lookup-failure)
-	(error "Cannot find slot %S" slot)
-	result)))
-
-(defun set-slot-value (object slot value)
-  (setf (getf (object-slots object) slo)
-	value))
-
-(defsetf slot-value set-slot-value)
-     
-
+;; We need a general tree transformer function to process the method
+;; body definitions.
+    
 (defun transform-tree (tester transformer tree)
   (cond ((consp tree)
 	 ;; it's a cons. process the two subtrees.
@@ -150,8 +170,8 @@
 
 (defun block-transform-message-sends (body)
   "Process the code in BODY to transform message send syntax.
-Vectors of the form [foo: ...] are transformed into Eon message
-sends: (>> :foo ...)"
+Vectors of the form [foo: ...] are transformed into Eon method
+invocations: (>> :foo ...)"
   (labels ((tester (tree)
 	     (and (vectorp tree)
 		  (let ((s (aref tree 0)))
@@ -173,7 +193,7 @@ sends: (>> :foo ...)"
 			  (make-selector (match-string 1 sym-name))
 			  (make-selector (match-string 2 sym-name)))
 		    ;; transform ordinary message sends (i.e. method from self)
-		    (list '>>
+		    (list 'invoke-method
 			  (make-keyword (substring sym-name 0 -1))))
 		;; paste in the rest of the message args, the same in either case
 		(subseq vec 1)))))
@@ -185,7 +205,7 @@ sends: (>> :foo ...)"
 (defun block-transform-slot-references (body)
   "Process the code in BODY to transform slot reference syntax.
 Symbols of the form `<foo>' will become Eon slot references:
- (slot-value :foo object)"
+ (slot-value object :foo)"
   (lexical-let (string slot-name)
       (labels ((tester (tree)
 		 (and (symbolp tree)
@@ -194,22 +214,68 @@ Symbols of the form `<foo>' will become Eon slot references:
 			(setf slot-name
 			      (when (string-match block-slot-reference-regexp string)
 				(match-string 1 string))))))
-	       (transformer (tree) (list 'slot-value (make-keyword slot-name) 'self)))
+	       (transformer (tree) (list 'slot-value 'self (make-keyword slot-name))))
 	(transform-tree #'tester #'transformer body))))
 
-(defmacro block+ (arglist &rest body)
+(defmacro eon-block (arglist &rest body)
   (declare (indent 1))
   (let ((max-lisp-eval-depth 4096))
     (let* ((body1 (block-transform-message-sends body))
 	   (body2 (block-transform-slot-references body1)))
       `(function* (lambda (self ,@arglist) ,@body2)))))
 
-(defmacro prog+ (object &rest body)
+(defmacro eon-prog (object &rest body)
   "Run the BODY forms with the object as self.
-The BODY forms are wrapped in a `block+', so full Eon syntax is
+The BODY forms are wrapped in an `eon-block+', so full Eon syntax is
 available."
   (declare (indent 1))
-  `(apply (block+ () ,@body) ,object nil))
+  `(apply (eon-block () ,@body) ,object nil))
+
+;;; Defining methods
+
+(defun class-method (class method)
+  (getf (class-methods class) (make-keyword method)))
+
+(defun set-class-method (class method func)
+  (setf (getf (class-methods class) (make-keyword method))
+	func))
+
+(defsetf class-method set-class-method)
+
+(defvar method-symbol-delimiter ">>")
+
+(defun method-symbol (class-name method)
+  (intern (concat (symbol-name class-name)
+		  method-symbol-delimiter
+		  (symbol-name (make-keyword method)))))
+
+(defmacro define-method (method class-name arglist &rest body)
+  (declare (indent 3)
+	   (debug (&define name sexp lambda-list
+			   [&optional stringp] def-body)))
+  (let ((class (class-definition class-name))
+	(method-symbol (method-symbol class-name method)))
+    `(progn 
+       (setf (class-method (class-definition ',class-name) ',method)
+	     ',method-symbol)
+       (defalias ',method-symbol (eon-block ,arglist 
+				   ,@(remove-if #'stringp body))))))
+
+(defun invoke-method (method object &rest args)
+  (let ((handler (class-method (class-definition 
+				(object-class-name object))
+			       method)))
+    (apply handler object args)))
+
+(defalias '>> 'invoke-method)
+
+(defun create-object (class-name &rest ignore)
+  (funcall (symbol-function (class-constructor 
+			     (class-definition class-name)))))
+
+(defmacro new (class-name &rest ignore)
+  `(create-object ',class-name ,@ignore))
+  
 
 (provide 'eon)
 ;;; eon.el ends here
