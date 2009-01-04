@@ -63,7 +63,7 @@
 (defvar slot-lookup-failure (gensym))
 
 (defun slot-value (object slot)
-  (let ((result (getf (object-slots object) slot)))
+  (let ((result (getf (object-slots object) slot slot-lookup-failure)))
     (if (eq result slot-lookup-failure)
 	(error "Cannot find slot %S" slot)
 	result)))
